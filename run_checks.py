@@ -23,6 +23,7 @@ Usage:
     python run_checks.py --samples 10    # show up to 10 bad rows per failing check
 """
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -57,6 +58,32 @@ def run_check(conn, check, samples):
     return passed, len(rows), cols, rows[:samples]
 
 
+def write_summary(results, errors, verdict):
+    """Write a Markdown table to the GitHub Actions job summary, if running there."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    icons = {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌", "ERROR": "💥"}
+    lines = [
+        "## Data-quality checks",
+        "",
+        f"**{verdict}**",
+        "",
+        "| | Check | Severity | Bad rows | Why it matters |",
+        "|---|---|---|---|---|",
+    ]
+    for status, c, n, _cols, _sample in results:
+        why = c["why"].replace("|", "\\|")
+        lines.append(f"| {icons[status]} | {c['name']} | {c['severity']} | {n if n is not None else '-'} | {why} |")
+    for status, c, n, cols, sample in results:
+        if status in ("FAIL", "WARN") and sample:
+            lines += ["", f"<details><summary>{c['name']}: sample bad rows</summary>", "", "```"]
+            lines += [", ".join(f"{k}={v}" for k, v in zip(cols, row)) for row in sample]
+            lines += ["```", "</details>"]
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("-k", dest="pattern", help="only run checks whose file name contains this text")
@@ -84,7 +111,7 @@ def main():
         print(f"       {str(exc).strip().splitlines()[0]}")
         return 2
 
-    failed_blockers, failed_warnings, errors = [], [], []
+    failed_blockers, failed_warnings, errors, results = [], [], [], []
     print(f"Running {len(checks)} checks on {conn.info.dbname}@{conn.info.host}:{conn.info.port}\n")
 
     with conn:
@@ -94,6 +121,7 @@ def main():
             except psycopg.Error as exc:
                 conn.rollback()
                 errors.append(c)
+                results.append(("ERROR", c, None, [], []))
                 print(f"ERROR  {c['name']}  ({c['file']})\n       {str(exc).strip().splitlines()[0]}")
                 continue
 
@@ -106,6 +134,7 @@ def main():
                 status = "WARN "
                 failed_warnings.append(c)
 
+            results.append((status.strip(), c, n, cols, sample))
             limit = f" (tolerated: {c['max_rows']})" if c["max_rows"] else ""
             print(f"{status}  [{c['severity']:<7}] {c['name']}: {n} bad rows{limit}")
             if not passed:
@@ -119,11 +148,16 @@ def main():
         f"{len(failed_warnings)} warnings, {len(failed_blockers)} blockers failed, {len(errors)} errors"
     )
     if errors:
+        write_summary(results, errors, "RESULT: ERROR - some checks could not run.")
         return 2
     if failed_blockers:
-        print("RESULT: BLOCKED - do not publish reports from this load.")
+        verdict = "RESULT: BLOCKED - do not publish reports from this load."
+        print(verdict)
+        write_summary(results, errors, verdict)
         return 1
-    print("RESULT: OK to publish." + (" Review the warnings." if failed_warnings else ""))
+    verdict = "RESULT: OK to publish." + (" Review the warnings." if failed_warnings else "")
+    print(verdict)
+    write_summary(results, errors, verdict)
     return 0
 
 

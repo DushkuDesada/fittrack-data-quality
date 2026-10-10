@@ -23,11 +23,22 @@ jobs:
 
       - name: Run report queries (read-only, must not error)
         run: |
+          {
+            echo "## Reports"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
           for f in reports/*.sql; do
             echo "::group::$f"
             docker compose exec -T -e PGOPTIONS="-c default_transaction_read_only=on" db \
-              psql -U fittrack -d fittrack -v ON_ERROR_STOP=1 < "$f"
+              psql -U fittrack -d fittrack -v ON_ERROR_STOP=1 --csv < "$f" > out.csv
+            cat out.csv
             echo "::endgroup::"
+            {
+              echo "### $(basename "$f" .sql) (first 15 rows)"
+              echo
+              head -n 16 out.csv | awk -F, 'NR==1 { h=$0; gsub(/,/," | ",h); print "| " h " |"; n=NF; s="|"; for(i=0;i<n;i++) s=s" --- |"; print s; next } { r=$0; gsub(/,/," | ",r); print "| " r " |" }'
+              echo
+            } >> "$GITHUB_STEP_SUMMARY"
           done
 
       - uses: actions/setup-python@v5
