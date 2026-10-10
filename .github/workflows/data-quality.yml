@@ -1,0 +1,41 @@
+name: data-quality
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    env:
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGDATABASE: fittrack
+      PGUSER: fittrack
+      PGPASSWORD: fittrack
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start Postgres 17 and load the data
+        run: docker compose up -d --wait
+
+      - name: Run report queries (read-only, must not error)
+        run: |
+          for f in reports/*.sql; do
+            echo "::group::$f"
+            docker compose exec -T -e PGOPTIONS="-c default_transaction_read_only=on" db \
+              psql -U fittrack -d fittrack -v ON_ERROR_STOP=1 < "$f"
+            echo "::endgroup::"
+          done
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run data-quality checks (fails the job on blockers)
+        run: python run_checks.py --samples 5
